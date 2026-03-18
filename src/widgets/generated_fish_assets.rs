@@ -63,6 +63,9 @@ pub fn get_generated_fish_assets() -> Vec<FishArt> {
             art,
             width: w,
             height: h,
+            prefers_right: super::asciiquarium::art_prefers_right(art),
+            mirrored: super::asciiquarium::mirror_ascii_line(art),
+            no_mirror: false,
         });
     }
     out

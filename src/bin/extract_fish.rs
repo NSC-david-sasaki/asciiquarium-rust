@@ -257,7 +257,7 @@ fn generate_rust_module(art_blocks: &[String]) -> String {
         out.push_str("    ];\n");
         out.push_str("    for art in arts {\n");
         out.push_str("        let (w, h) = measure_art(art);\n");
-        out.push_str("        out.push(FishArt { art, width: w, height: h });\n");
+               out.push_str("        out.push(FishArt { art, width: w, height: h, prefers_right: super::asciiquarium::art_prefers_right(art), mirrored: super::asciiquarium::mirror_ascii_line(art), no_mirror: false });\n");
         out.push_str("    }\n");
     }
     out.push_str("    out\n");

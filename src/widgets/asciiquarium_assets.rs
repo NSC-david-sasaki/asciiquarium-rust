@@ -109,6 +109,15 @@ const FISH_13: &str = r#"
  \`
 "#;
 
+// crab
+const FISH_14: &str = r#"
+       __^_^__
+   \/ /  o o  \ \/
+     '_   ¬   _'
+    /\ '-----' /\
+"#;
+
+
 /// Measure an ASCII art block's dimensions as (width, height),
 /// where width is the maximum character count of any line and height
 /// is the total number of lines. Guarantees minimum size of 1x1.
@@ -131,13 +140,18 @@ pub fn get_fish_assets() -> Vec<FishArt> {
     let mut out = Vec::new();
     for art in [
         FISH_01, FISH_02, FISH_03, FISH_04, FISH_05, FISH_06, FISH_07, FISH_08, FISH_09, FISH_10,
-        FISH_11, FISH_12, FISH_13,
+        FISH_11, FISH_12, FISH_13, FISH_14
     ] {
         let (w, h) = measure_art(art);
         out.push(FishArt {
             art,
             width: w,
             height: h,
+            prefers_right: super::asciiquarium::art_prefers_right(art),
+            mirrored: super::asciiquarium::mirror_ascii_line(art),
+            // Mark specific curated assets as not mirrorable so they keep a fixed orientation.
+            // Crab: contains "__^_^__" or "o o"; FISH_03: contains the "><(o" cue.
+            no_mirror: art.contains("__^_^__") || art.contains("o o") || art.contains("><(o"),
         });
     }
     out
