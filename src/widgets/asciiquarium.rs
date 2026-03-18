@@ -11,17 +11,25 @@ Agent Log:
 */
 
 use egui;
+use once_cell::sync::Lazy;
+use std::sync::Arc;
 
 const CLASSIC_BUBBLE_TICKS: u64 = 24;
 const CLASSIC_DT: f32 = 0.033;
 const CLASSIC_FISH_SPEED_MULT: f32 = 2.0;
 
 /// Visual asset for a fish (ASCII art and its measured dimensions).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct FishArt {
     pub art: &'static str,
     pub width: usize,
     pub height: usize,
+    /// Whether the art prefers facing right (precomputed)
+    pub prefers_right: bool,
+    /// Precomputed mirrored version of `art` for fast rendering.
+    pub mirrored: String,
+    /// When true, the renderer will not mirror this asset when velocity changes.
+    pub no_mirror: bool,
 }
 
 /// A single moving fish instance in the aquarium.
@@ -189,6 +197,25 @@ const WATER_LINES: [&str; 4] = [
     "^^      ^^^^      ^^^    ^^^^^^  ",
 ];
 
+// Precompute pattern chars for waterlines to avoid allocating every frame.
+static PATTERNS: Lazy<[Vec<char>; 4]> = Lazy::new(|| {
+    [
+        WATER_LINES[0].chars().collect(),
+        WATER_LINES[1].chars().collect(),
+        WATER_LINES[2].chars().collect(),
+        WATER_LINES[3].chars().collect(),
+    ]
+});
+
+// Cache measured dims for large static blocks so we don't recompute per-frame.
+static SHIP_R_DIM: Lazy<(usize, usize)> = Lazy::new(|| measure_block(SHIP_R));
+static SHIP_L_DIM: Lazy<(usize, usize)> = Lazy::new(|| measure_block(SHIP_L));
+static SHARK_R_DIM: Lazy<(usize, usize)> = Lazy::new(|| measure_block(SHARK_R));
+static SHARK_L_DIM: Lazy<(usize, usize)> = Lazy::new(|| measure_block(SHARK_L));
+static WHALE_R_DIM: Lazy<(usize, usize)> = Lazy::new(|| measure_block(WHALE_R));
+static WHALE_L_DIM: Lazy<(usize, usize)> = Lazy::new(|| measure_block(WHALE_L));
+static CASTLE_DIM: Lazy<(usize, usize)> = Lazy::new(|| measure_block(CASTLE));
+
 const CASTLE: &str = r#"
                T~~
                |
@@ -332,7 +359,7 @@ fn mirror_char(c: char) -> char {
 }
 
 /// Mirror an ASCII line: reverse order and swap mirrored pairs.
-fn mirror_ascii_line(s: &str) -> String {
+pub(super) fn mirror_ascii_line(s: &str) -> String {
     s.chars().rev().map(mirror_char).collect()
 }
 
@@ -342,7 +369,7 @@ fn mirror_ascii_line(s: &str) -> String {
 /// - Right/left-facing substring cues (e.g., \"('>\", \"o>\", \"<')\", \"<o\")
 /// - Line-based cues (line ends with '>' or starts with '<')
 ///   Defaults to right-facing when balanced.
-fn art_prefers_right(art: &str) -> bool {
+pub(super) fn art_prefers_right(art: &str) -> bool {
     // 1) Base score from arrow counts
     let mut gt = 0i32;
     let mut lt = 0i32;
@@ -460,11 +487,7 @@ pub fn update_aquarium(state: &mut AquariumState, assets: &[FishArt]) {
     if state.env.ships.is_empty() && state.tick >= state.env.next_ship_spawn {
         // Alternate direction by epoch (simple deterministic scheme).
         let right = (state.tick / 900) % 2 == 0;
-        let (sw, _) = if right {
-            measure_block(SHIP_R)
-        } else {
-            measure_block(SHIP_L)
-        };
+        let (sw, _) = if right { *SHIP_R_DIM } else { *SHIP_L_DIM };
         let (x, vx) = if right {
             (-(sw as f32), 6.0)
         } else {
@@ -474,15 +497,11 @@ pub fn update_aquarium(state: &mut AquariumState, assets: &[FishArt]) {
     }
     if state.env.sharks.is_empty() && state.tick >= state.env.next_shark_spawn {
         // Place shark at a consistent depth under waterlines.
-        let (_, sh) = measure_block(SHARK_R);
+        let (_, sh) = *SHARK_R_DIM;
         let base = 9;
         let y = state.size.1.saturating_sub(sh + 3).max(base);
         let right = (state.tick / 1200) % 2 == 0;
-        let (sw, _) = if right {
-            measure_block(SHARK_R)
-        } else {
-            measure_block(SHARK_L)
-        };
+        let (sw, _) = if right { *SHARK_R_DIM } else { *SHARK_L_DIM };
         let (x, vx) = if right {
             (-(sw as f32), 8.0)
         } else {
@@ -494,11 +513,7 @@ pub fn update_aquarium(state: &mut AquariumState, assets: &[FishArt]) {
         // Mid-depth whale.
         let y = (state.size.1 / 3).max(6);
         let right = (state.tick / 1500) % 2 == 0;
-        let (ww, _) = if right {
-            measure_block(WHALE_R)
-        } else {
-            measure_block(WHALE_L)
-        };
+        let (ww, _) = if right { *WHALE_R_DIM } else { *WHALE_L_DIM };
         let (x, vx) = if right {
             (-(ww as f32), 4.0)
         } else {
@@ -532,11 +547,9 @@ pub fn update_aquarium(state: &mut AquariumState, assets: &[FishArt]) {
         }
         state.env.next_school_spawn = state.tick + 1800; // ~60s at 30 fps
     }
-    // Update fish with behavior-aware logic (Transit vs Normal).
-    let mut kept_fishes: Vec<FishInstance> = Vec::with_capacity(state.fishes.len());
-    let mut kept_behaviors: Vec<FishBehavior> = Vec::with_capacity(state.fish_behaviors.len());
+    // Update fish in-place to avoid cloning every fish; only clone kept fish later.
     for i in 0..state.fishes.len() {
-        let mut fish = state.fishes[i].clone();
+        let fish = &mut state.fishes[i];
         let behavior = *state.fish_behaviors.get(i).unwrap_or(&FishBehavior::Normal);
 
         fish.position.0 += fish.velocity.0 * dt * fish_speed_mult;
@@ -552,69 +565,79 @@ pub fn update_aquarium(state: &mut AquariumState, assets: &[FishArt]) {
             .map(|a| (a.width as f32, a.height as f32))
             .unwrap_or((1.0, 1.0));
 
+        if behavior == FishBehavior::Normal {
+            // Normal bounce behavior (in-place).
+            if fish.position.0 < 0.0 {
+                fish.position.0 = 0.0;
+                fish.velocity.0 = fish.velocity.0.abs();
+                let flip_seed = ((state.tick) ^ ((fish.fish_art_index as u64) << 12)
+                    ^ 0x9E37_79B9_7F4A_7C15)
+                    .wrapping_mul(6364136223846793005);
+                if (flip_seed & 0x0F) == 0 {
+                    fish.velocity.1 = -fish.velocity.1;
+                }
+            } else if fish.position.0 + fw > aw {
+                fish.position.0 = (aw - fw).max(0.0);
+                fish.velocity.0 = -fish.velocity.0.abs();
+                let flip_seed = ((state.tick) ^ ((fish.fish_art_index as u64) << 13)
+                    ^ 0x9E37_79B9_7F4A_7C15)
+                    .wrapping_mul(6364136223846793005);
+                if (flip_seed & 0x0F) == 0 {
+                    fish.velocity.1 = -fish.velocity.1;
+                }
+            }
+
+            if fish.position.1 < 0.0 {
+                fish.position.1 = 0.0;
+                fish.velocity.1 = fish.velocity.1.abs();
+                let flip_seed = ((state.tick) ^ ((fish.fish_art_index as u64) << 14)
+                    ^ 0x9E37_79B9_7F4A_7C15)
+                    .wrapping_mul(6364136223846793005);
+                if (flip_seed & 0x0F) == 0 {
+                    fish.velocity.0 = -fish.velocity.0;
+                }
+            } else if fish.position.1 + fh > ah {
+                fish.position.1 = (ah - fh).max(0.0);
+                fish.velocity.1 = -fish.velocity.1.abs();
+                let flip_seed = ((state.tick) ^ ((fish.fish_art_index as u64) << 15)
+                    ^ 0x9E37_79B9_7F4A_7C15)
+                    .wrapping_mul(6364136223846793005);
+                if (flip_seed & 0x0F) == 0 {
+                    fish.velocity.0 = -fish.velocity.0;
+                }
+            }
+        }
+        // Transit fish are left as-moved here; culling happens below.
+    }
+
+    // Cull transit fish (only clone kept fishes into new vectors).
+    let mut keep_indices: Vec<usize> = Vec::with_capacity(state.fishes.len());
+    for (i, fish) in state.fishes.iter().enumerate() {
+        let behavior = *state.fish_behaviors.get(i).unwrap_or(&FishBehavior::Normal);
         if behavior == FishBehavior::Transit {
-            // Despawn transit fish once fully off-screen.
+            let (fw, _) = assets
+                .get(fish.fish_art_index)
+                .map(|a| (a.width as f32, a.height as f32))
+                .unwrap_or((1.0, 1.0));
             let off_right = fish.position.0 > aw;
             let off_left = fish.position.0 + fw <= 0.0;
             if off_right || off_left {
-                // drop (do not keep)
-            } else {
-                kept_fishes.push(fish);
-                kept_behaviors.push(behavior);
-            }
-            continue;
-        }
-
-        // Normal bounce behavior.
-        if fish.position.0 < 0.0 {
-            fish.position.0 = 0.0;
-            fish.velocity.0 = fish.velocity.0.abs();
-            // Small deterministic chance to flip vertical direction on wall bounce for natural variance.
-            let flip_seed =
-                ((state.tick) ^ ((fish.fish_art_index as u64) << 12) ^ 0x9E37_79B9_7F4A_7C15)
-                    .wrapping_mul(6364136223846793005);
-            if (flip_seed & 0x0F) == 0 {
-                fish.velocity.1 = -fish.velocity.1;
-            }
-        } else if fish.position.0 + fw > aw {
-            fish.position.0 = (aw - fw).max(0.0);
-            fish.velocity.0 = -fish.velocity.0.abs();
-            // Small deterministic chance to flip vertical direction on wall bounce for natural variance.
-            let flip_seed =
-                ((state.tick) ^ ((fish.fish_art_index as u64) << 13) ^ 0x9E37_79B9_7F4A_7C15)
-                    .wrapping_mul(6364136223846793005);
-            if (flip_seed & 0x0F) == 0 {
-                fish.velocity.1 = -fish.velocity.1;
+                continue; // drop transit fish
             }
         }
-
-        if fish.position.1 < 0.0 {
-            fish.position.1 = 0.0;
-            fish.velocity.1 = fish.velocity.1.abs();
-            // Small deterministic chance to flip horizontal direction on wall bounce for natural variance.
-            let flip_seed =
-                ((state.tick) ^ ((fish.fish_art_index as u64) << 14) ^ 0x9E37_79B9_7F4A_7C15)
-                    .wrapping_mul(6364136223846793005);
-            if (flip_seed & 0x0F) == 0 {
-                fish.velocity.0 = -fish.velocity.0;
-            }
-        } else if fish.position.1 + fh > ah {
-            fish.position.1 = (ah - fh).max(0.0);
-            fish.velocity.1 = -fish.velocity.1.abs();
-            // Small deterministic chance to flip horizontal direction on wall bounce for natural variance.
-            let flip_seed =
-                ((state.tick) ^ ((fish.fish_art_index as u64) << 15) ^ 0x9E37_79B9_7F4A_7C15)
-                    .wrapping_mul(6364136223846793005);
-            if (flip_seed & 0x0F) == 0 {
-                fish.velocity.0 = -fish.velocity.0;
-            }
-        }
-
-        kept_fishes.push(fish);
-        kept_behaviors.push(behavior);
+        keep_indices.push(i);
     }
-    state.fishes = kept_fishes;
-    state.fish_behaviors = kept_behaviors;
+
+    if keep_indices.len() != state.fishes.len() {
+        let mut new_fishes = Vec::with_capacity(keep_indices.len());
+        let mut new_behaviors = Vec::with_capacity(keep_indices.len());
+        for &i in &keep_indices {
+            new_fishes.push(state.fishes[i].clone());
+            new_behaviors.push(state.fish_behaviors[i]);
+        }
+        state.fishes = new_fishes;
+        state.fish_behaviors = new_behaviors;
+    }
 
     // Occasionally emit bubbles from fish mouths, deterministically based on tick.
     // Emit every 24 ticks per fish to avoid randomness in the core crate.
@@ -654,11 +677,7 @@ pub fn update_aquarium(state: &mut AquariumState, assets: &[FishArt]) {
     let mut next_ships = Vec::with_capacity(state.env.ships.len());
     for mut ship in state.env.ships.drain(..) {
         ship.x += ship.vx * dt;
-        let (sw, _) = if ship.vx >= 0.0 {
-            measure_block(SHIP_R)
-        } else {
-            measure_block(SHIP_L)
-        };
+        let (sw, _) = if ship.vx >= 0.0 { *SHIP_R_DIM } else { *SHIP_L_DIM };
         let off_right = ship.x > state.size.0 as f32;
         let off_left = ship.x + sw as f32 <= 0.0;
         if off_right || off_left {
@@ -674,11 +693,7 @@ pub fn update_aquarium(state: &mut AquariumState, assets: &[FishArt]) {
     let mut next_sharks = Vec::with_capacity(state.env.sharks.len());
     for mut shark in state.env.sharks.drain(..) {
         shark.x += shark.vx * dt;
-        let (sw, _) = if shark.vx >= 0.0 {
-            measure_block(SHARK_R)
-        } else {
-            measure_block(SHARK_L)
-        };
+        let (sw, _) = if shark.vx >= 0.0 { *SHARK_R_DIM } else { *SHARK_L_DIM };
         let off_right = shark.x > state.size.0 as f32;
         let off_left = shark.x + sw as f32 <= 0.0;
         if off_right || off_left {
@@ -694,11 +709,7 @@ pub fn update_aquarium(state: &mut AquariumState, assets: &[FishArt]) {
     let mut next_whales = Vec::with_capacity(state.env.whales.len());
     for mut whale in state.env.whales.drain(..) {
         whale.x += whale.vx * dt;
-        let (ww, _) = if whale.vx >= 0.0 {
-            measure_block(WHALE_R)
-        } else {
-            measure_block(WHALE_L)
-        };
+        let (ww, _) = if whale.vx >= 0.0 { *WHALE_R_DIM } else { *WHALE_L_DIM };
         let off_right = whale.x > state.size.0 as f32;
         let off_left = whale.x + ww as f32 <= 0.0;
         if off_right || off_left {
@@ -734,12 +745,7 @@ pub fn render_aquarium_to_string(state: &AquariumState, assets: &[FishArt]) -> S
     let mut grid = vec![' '; w * h];
 
     // 1) Waterlines with per-column vertical offsets for wave dynamics.
-    let patterns: [Vec<char>; 4] = [
-        WATER_LINES[0].chars().collect(),
-        WATER_LINES[1].chars().collect(),
-        WATER_LINES[2].chars().collect(),
-        WATER_LINES[3].chars().collect(),
-    ];
+    let patterns = &*PATTERNS;
     let plens = [
         patterns[0].len().max(1),
         patterns[1].len().max(1),
@@ -803,7 +809,7 @@ pub fn render_aquarium_to_string(state: &AquariumState, assets: &[FishArt]) -> S
 
     // 2) Castle at bottom-right if enabled.
     if state.env.castle {
-        let (cw, ch) = measure_block(CASTLE);
+        let (cw, ch) = *CASTLE_DIM;
         let base_x = w.saturating_sub(cw + 1);
         let base_y = h.saturating_sub(ch);
         for (dy, line) in CASTLE.lines().enumerate() {
@@ -954,33 +960,51 @@ pub fn render_aquarium_to_string(state: &AquariumState, assets: &[FishArt]) -> S
         let x0 = fish.position.0.floor() as isize;
         let y0 = fish.position.1.floor() as isize;
 
-        let mirror = {
-            let prefers_right = art_prefers_right(art.art);
-            (fish.velocity.0 < 0.0 && prefers_right) || (fish.velocity.0 > 0.0 && !prefers_right)
+        let mirror = if art.no_mirror {
+            false
+        } else {
+            (fish.velocity.0 < 0.0 && art.prefers_right)
+                || (fish.velocity.0 > 0.0 && !art.prefers_right)
         };
-        for (dy, raw_line) in art.art.lines().enumerate() {
-            let y = y0 + dy as isize;
-            if y < 0 || y >= h as isize {
-                continue;
+
+        if mirror {
+            for (dy, raw_line) in art.mirrored.lines().enumerate() {
+                let y = y0 + dy as isize;
+                if y < 0 || y >= h as isize {
+                    continue;
+                }
+
+                for (dx, ch) in raw_line.chars().enumerate() {
+                    if ch == ' ' || ch == '?' {
+                        continue;
+                    }
+                    let x = x0 + dx as isize;
+                    if x < 0 || x >= w as isize {
+                        continue;
+                    }
+                    grid[y as usize * w + x as usize] = ch;
+                }
             }
-
-            let line_str = if mirror {
-                mirror_ascii_line(raw_line)
-            } else {
-                raw_line.to_string()
-            };
-
-            for (dx, ch) in line_str.chars().enumerate() {
-                if ch == ' ' || ch == '?' {
+        } else {
+            for (dy, raw_line) in art.art.lines().enumerate() {
+                let y = y0 + dy as isize;
+                if y < 0 || y >= h as isize {
                     continue;
                 }
-                let x = x0 + dx as isize;
-                if x < 0 || x >= w as isize {
-                    continue;
+
+                for (dx, ch) in raw_line.chars().enumerate() {
+                    if ch == ' ' || ch == '?' {
+                        continue;
+                    }
+                    let x = x0 + dx as isize;
+                    if x < 0 || x >= w as isize {
+                        continue;
+                    }
+                    grid[y as usize * w + x as usize] = ch;
                 }
-                grid[y as usize * w + x as usize] = ch;
             }
         }
+        
     }
 
     // 5) Bubbles (top-most), simple '.' markers with clipping.
@@ -1025,33 +1049,109 @@ impl<'a> egui::Widget for AsciiquariumWidget<'a> {
                 // Make sure this uses a monospace font
                 let mono = egui::FontId::monospace(12.0);
 
-                for (row_idx, line) in rendered_string.lines().enumerate() {
-                    for ch in line.chars() {
-                        let color = match ch {
-                            // Water surface
-                            '~' | '^' => pal.water,
-                            // Seaweed
-                            '(' | ')' => pal.seaweed,
-                            // Castle (fallback to text color; many different chars)
-                            // We leave castle to default unless specifically themed elsewhere.
-                            // Ship (same approach as castle)
-                            // Bubbles
-                            '.' => pal.bubble,
-                            // Mask placeholders from original assets: color as subtle water trail
-                            '?' => pal.water_trail,
-                            // Default fish and all other glyphs
-                            _ => self.theme.text_color,
+                // Build a mask of cells occupied by the curated crab asset so we can color it red.
+                let (w, h) = self.state.size;
+                let mut crab_mask = vec![false; w.saturating_mul(h)];
+                // Find curated crab index (same heuristic as example)
+                let crab_idx = self
+                    .assets
+                    .iter()
+                    .position(|a| a.art.contains("__^_^__") || a.art.contains("o o"));
+                if let Some(crab_idx) = crab_idx {
+                    for fish in &self.state.fishes {
+                        if fish.fish_art_index != crab_idx {
+                            continue;
+                        }
+                        let art = match self.assets.get(fish.fish_art_index) {
+                            Some(a) => a,
+                            None => continue,
                         };
-                        job.append(
-                            &ch.to_string(),
-                            0.0,
-                            egui::TextFormat {
-                                font_id: mono.clone(),
-                                color,
-                                ..Default::default()
-                            },
-                        );
+                        let x0 = fish.position.0.floor() as isize;
+                        let y0 = fish.position.1.floor() as isize;
+                        let mirror = if art.no_mirror { false } else {
+                            (fish.velocity.0 < 0.0 && art.prefers_right)
+                                || (fish.velocity.0 > 0.0 && !art.prefers_right)
+                        };
+                        let lines_iter = if mirror {
+                            art.mirrored.lines().collect::<Vec<_>>()
+                        } else {
+                            art.art.lines().collect::<Vec<_>>()
+                        };
+                        for (dy, raw_line) in lines_iter.iter().enumerate() {
+                            let y = y0 + dy as isize;
+                            if y < 0 || y >= h as isize {
+                                continue;
+                            }
+                            for (dx, ch) in raw_line.chars().enumerate() {
+                                if ch == ' ' || ch == '?' {
+                                    continue;
+                                }
+                                let x = x0 + dx as isize;
+                                if x < 0 || x >= w as isize {
+                                    continue;
+                                }
+                                let idx = (y as usize).saturating_mul(w) + (x as usize);
+                                if idx < crab_mask.len() {
+                                    crab_mask[idx] = true;
+                                }
+                            }
+                        }
                     }
+                }
+
+                for (row_idx, line) in rendered_string.lines().enumerate() {
+                    // Group consecutive characters with the same color into single appends
+                    let mut run_buf = String::with_capacity(line.len());
+                    let mut run_color: Option<egui::Color32> = None;
+
+                    let push_run = |job: &mut egui::text::LayoutJob, buf: &mut String, color: egui::Color32, mono: &egui::FontId| {
+                        if !buf.is_empty() {
+                            job.append(
+                                &buf,
+                                0.0,
+                                egui::TextFormat {
+                                    font_id: mono.clone(),
+                                    color,
+                                    ..Default::default()
+                                },
+                            );
+                            buf.clear();
+                        }
+                    };
+
+                    for (col_idx, ch) in line.chars().enumerate() {
+                        let cell_idx = row_idx.saturating_mul(self.state.size.0) + col_idx;
+                        let color = if cell_idx < crab_mask.len() && crab_mask[cell_idx] {
+                            // Crab color: red
+                            egui::Color32::from_rgb(220, 80, 80)
+                        } else {
+                            match ch {
+                                '~' | '^' => pal.water,
+                                '(' | ')' => pal.seaweed,
+                                '.' => pal.bubble,
+                                '?' => pal.water_trail,
+                                _ => self.theme.text_color,
+                            }
+                        };
+
+                        match run_color {
+                            Some(c) if c == color => run_buf.push(ch),
+                            Some(c) => {
+                                push_run(&mut job, &mut run_buf, c, &mono);
+                                run_color = Some(color);
+                                run_buf.push(ch);
+                            }
+                            None => {
+                                run_color = Some(color);
+                                run_buf.push(ch);
+                            }
+                        }
+                    }
+
+                    if let Some(c) = run_color {
+                        push_run(&mut job, &mut run_buf, c, &mono);
+                    }
+
                     if row_idx + 1 < self.state.size.1 {
                         job.append(
                             "\n",
@@ -1065,8 +1165,10 @@ impl<'a> egui::Widget for AsciiquariumWidget<'a> {
                     }
                 }
 
-                let label =
-                    egui::Label::new(egui::WidgetText::LayoutJob(job)).wrap(self.theme.wrap);
+                let mut label = egui::Label::new(egui::WidgetText::LayoutJob(Arc::new(job)));
+                if self.theme.wrap {
+                    label = label.wrap();
+                }
                 if let Some(fill) = self.theme.background {
                     egui::Frame::default()
                         .fill(fill)
@@ -1080,7 +1182,7 @@ impl<'a> egui::Widget for AsciiquariumWidget<'a> {
                 let text = egui::RichText::new(rendered_string)
                     .monospace()
                     .color(self.theme.text_color);
-                let label = egui::Label::new(text).wrap(self.theme.wrap);
+                let label = egui::Label::new(text).wrap();
                 if let Some(fill) = self.theme.background {
                     egui::Frame::default()
                         .fill(fill)
@@ -1095,7 +1197,10 @@ impl<'a> egui::Widget for AsciiquariumWidget<'a> {
             let text = egui::RichText::new(rendered_string)
                 .monospace()
                 .color(self.theme.text_color);
-            let label = egui::Label::new(text).wrap(self.theme.wrap);
+            let mut label = egui::Label::new(text);
+            if self.theme.wrap {
+                label = label.wrap();
+            }
             if let Some(fill) = self.theme.background {
                 egui::Frame::default()
                     .fill(fill)
@@ -1119,6 +1224,9 @@ mod tests {
             art: "<>",
             width: 2,
             height: 1,
+            prefers_right: art_prefers_right("<>"),
+            mirrored: mirror_ascii_line("<>"),
+            no_mirror: false,
         }]
     }
 

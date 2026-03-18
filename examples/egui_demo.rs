@@ -5,14 +5,14 @@ use asciiquarium_rust::{
     FishInstance,
 };
 use eframe::egui;
-use rand::Rng;
+// Use a tiny deterministic LCG inside `spawn_random_fish` instead of `rand`.
 
 fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions::default();
     eframe::run_native(
         "Asciiquarium egui demo",
         native_options,
-        Box::new(|_cc| Box::new(MyApp::new())),
+        Box::new(|_cc| Ok(Box::new(MyApp::new()))),
     )
 }
 
@@ -43,11 +43,14 @@ impl MyApp {
             spawn_random_fish(&mut state, assets.len());
         }
 
+        // Add a single crab asset on startup (search curated assets for crab)
+        spawn_crab(&mut state, &assets);
+
         let theme = AsciiquariumTheme {
             text_color: egui::Color32::from_rgb(180, 220, 255),
             background: Some(egui::Color32::from_rgb(8, 12, 16)),
             wrap: false,
-            enable_color: false,
+            enable_color: true,
             palette: None,
         };
 
@@ -168,6 +171,9 @@ impl eframe::App for MyApp {
                 if ui.button("Add fish").clicked() {
                     spawn_random_fish(&mut self.state, self.assets.len());
                 }
+                if ui.button("Add crab").clicked() {
+                    spawn_crab(&mut self.state, &self.assets);
+                }
                 if ui.button("Reset").clicked() {
                     self.state.fishes.clear();
                     for _ in 0..6 {
@@ -192,29 +198,27 @@ fn spawn_random_fish(state: &mut AquariumState, asset_count: usize) {
     if asset_count == 0 {
         return;
     }
-    let mut rng = rand::thread_rng();
+    // Tiny deterministic LCG for example RNG (avoids depending on `rand` features).
+    let mut s: u64 = 0x1234_5678_9ABC_DEF0u64 ^ (asset_count as u64);
+    let mut next_u32 = || {
+        s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
+        (s >> 32) as u32
+    };
 
-    let idx = rng.gen_range(0..asset_count);
+    let idx = (next_u32() as usize) % asset_count;
 
     // Random position within grid; update() will clamp on edges using asset size
-    let max_x = if state.size.0 > 0 {
-        state.size.0 - 1
-    } else {
-        0
-    };
-    let max_y = if state.size.1 > 0 {
-        state.size.1 - 1
-    } else {
-        0
-    };
-    let x = rng.gen_range(0..=max_x) as f32;
-    let y = rng.gen_range(0..=max_y) as f32;
+    let max_x = if state.size.0 > 0 { state.size.0 - 1 } else { 0 };
+    let max_y = if state.size.1 > 0 { state.size.1 - 1 } else { 0 };
+    let x = (next_u32() as usize % (max_x + 1)) as f32;
+    let y = (next_u32() as usize % (max_y + 1)) as f32;
 
     // Classic Asciiquarium pacing: horizontal speed 2.5..22.5 cps, minimal vertical drift
-    let speed = rng.gen_range(2.5_f32..=22.5_f32);
-    let dir = if rng.gen_bool(0.5) { -1.0 } else { 1.0 };
+    let r = (next_u32() as f32) / (u32::MAX as f32);
+    let speed = 2.5_f32 + r * (22.5_f32 - 2.5_f32);
+    let dir = if (next_u32() & 1) == 0 { -1.0 } else { 1.0 };
     let vx = dir * speed;
-    let mut vy = rng.gen_range(-0.6_f32..=0.6_f32);
+    let mut vy = -0.6_f32 + (next_u32() as f32) / (u32::MAX as f32) * 1.2_f32;
     if vy.abs() < 0.05 {
         vy = 0.0;
     }
@@ -223,6 +227,37 @@ fn spawn_random_fish(state: &mut AquariumState, asset_count: usize) {
         fish_art_index: idx,
         position: (x, y),
         velocity: (vx, vy),
+    });
+    state
+        .fish_behaviors
+        .push(asciiquarium_rust::widgets::asciiquarium::FishBehavior::Normal);
+}
+
+fn spawn_crab(state: &mut AquariumState, assets: &[asciiquarium_rust::FishArt]) {
+    if assets.is_empty() {
+        return;
+    }
+    // Try to find the curated crab asset by a distinctive substring; fall back to the last asset.
+    let idx = assets
+        .iter()
+        .position(|a| a.art.contains("__^_^__") || a.art.contains("o o"))
+        .unwrap_or(assets.len() - 1);
+    // Ensure crab is positioned fully on-screen (account for asset height/width)
+    let art = &assets[idx];
+    let fw = art.width;
+    let fh = art.height;
+    let x = if state.size.0 > fw { (state.size.0 - fw) / 2 } else { 0 };
+    // Place crab near bottom but keep it visible
+    let y = if state.size.1 > fh { state.size.1 - fh } else { 0 };
+
+    // Alternate initial horizontal direction so multiple crabs don't all go same way
+    let dir = if (state.tick + state.fishes.len() as u64) % 2 == 0 { 1.0 } else { -1.0 };
+    let speed = 6.0_f32 * dir; // characters/sec multiplier handled by update
+
+    state.fishes.push(FishInstance {
+        fish_art_index: idx,
+        position: (x as f32, y as f32),
+        velocity: (speed, 0.0),
     });
     state
         .fish_behaviors
