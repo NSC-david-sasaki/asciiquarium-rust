@@ -13,7 +13,23 @@ path = "src/lib.rs"
 [dependencies]
 egui = "0.33.3"
 once_cell = "1.18"
+axum = { version = "0.8.8", features = ["ws"], optional = true }
+tokio = { version = "1", features = ["full"], optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+tower = { version = "0.5.3", optional = true }
+tower-http = { version = "0.6.8", features = ["cors"], optional = true }
+futures = { version = "0.3", optional = true }
 
 [dev-dependencies]
 eframe = "0.33.3"
 rand = "0.10"
+
+[features]
+web = ["axum", "tokio", "serde_json", "tower", "tower-http", "futures", "serde"]
+
+[[bin]]
+name = "web_server"
+path = "src/bin/web_server.rs"
+required-features = ["web"]
+
