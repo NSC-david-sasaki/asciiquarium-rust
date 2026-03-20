@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Asciiquarium Web Viewer</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Courier New', monospace;
+            background-color: #0a0e10;
+            color: #b4dcff;
+            overflow: hidden;
+        }
+
+        #app {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+
+        #controls {
+            background-color: #1a2530;
+            border-bottom: 2px solid #4a6fa5;
+            padding: 12px;
+            overflow-x: auto;
+        }
+
+        .control-group {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            margin-right: 20px;
+            flex-wrap: wrap;
+        }
+
+        .control-group label {
+            font-weight: bold;
+            font-size: 12px;
+            text-transform: uppercase;
+            color: #bcd2ff;
+        }
+
+        button {
+            padding: 6px 12px;
+            background-color: #2a4a7a;
+            color: #b4dcff;
+            border: 1px solid #4a7ab0;
+            border-radius: 3px;
+            cursor: pointer;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            transition: background-color 0.2s;
+        }
+
+        button:hover {
+            background-color: #3a5a9a;
+        }
+
+        button:active {
+            background-color: #1a3a6a;
+        }
+
+        input[type="number"] {
+            width: 50px;
+            padding: 4px;
+            background-color: #0f1820;
+            color: #b4dcff;
+            border: 1px solid #4a6fa5;
+            border-radius: 3px;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+
+        input[type="color"] {
+            width: 40px;
+            height: 30px;
+            border: 1px solid #4a6fa5;
+            border-radius: 3px;
+            cursor: pointer;
+        }
+
+        #viewer {
+            flex: 1;
+            overflow: auto;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        #aquarium {
+            background-color: #080c10;
+            border: 2px solid #4a7ab0;
+            padding: 10px;
+            line-height: 1;
+            letter-spacing: 0;
+            white-space: pre;
+            font-size: 12px;
+            overflow: hidden;
+            box-shadow: inset 0 0 20px rgba(0, 0, 0, 0.5);
+        }
+
+        /* Color classes for aquarium elements */
+        .water { color: #78b4ff; }        /* 120, 180, 255 */
+        .seaweed { color: #3cb478; }      /* 60, 180, 120 */
+        .bubble { color: #c8e6ff; }       /* 200, 230, 255 */
+        .trail { color: #78b4ff; }        /* Water trail */
+        .crab { color: #dc5050; }         /* 220, 80, 80 */
+
+        .status {
+            text-align: center;
+            padding: 20px;
+            font-size: 14px;
+        }
+
+        .status.connecting {
+            color: #ffaa44;
+        }
+
+        .status.error {
+            color: #ff6644;
+        }
+
+        .status.connected {
+            color: #44ff44;
+        }
+
+        input[type="range"] {
+            width: 100px;
+        }
+
+        .separator {
+            display: inline-block;
+            width: 1px;
+            height: 24px;
+            background-color: #4a6fa5;
+            margin: 0 12px;
+        }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <div id="controls">
+            <div class="control-group">
+                <label>Grid Size:</label>
+                <button id="btn-width-dec">-W</button>
+                <span id="width-display">80</span>
+                <button id="btn-width-inc">+W</button>
+                <button id="btn-height-dec">-H</button>
+                <span id="height-display">24</span>
+                <button id="btn-height-inc">+H</button>
+            </div>
+
+            <div class="separator"></div>
+
+            <div class="control-group">
+                <button id="btn-add-fish">Add Fish</button>
+                <button id="btn-add-crab">Add Crab</button>
+                <button id="btn-reset">Reset</button>
+            </div>
+
+            <div class="separator"></div>
+
+            <div class="control-group">
+                <label>Status:</label>
+                <span id="status" class="status connecting">Connecting...</span>
+            </div>
+        </div>
+
+        <div id="viewer">
+            <div id="aquarium"></div>
+        </div>
+    </div>
+
+    <script>
+        const aquariumDiv = document.getElementById('aquarium');
+        const statusSpan = document.getElementById('status');
+        const widthDisplay = document.getElementById('width-display');
+        const heightDisplay = document.getElementById('height-display');
+
+        let currentWidth = 80;
+        let currentHeight = 24;
+        let ws;
+
+        // Apply palette colors via CSS
+        function applyPaletteStyles(palette) {
+            const style = document.getElementById('dynamic-colors') || createStyleTag();
+            const colorRules = `
+                .water { color: ${palette.water} !important; }
+                .seaweed { color: ${palette.seaweed} !important; }
+                .bubble { color: ${palette.bubble} !important; }
+                .trail { color: ${palette.water_trail} !important; }
+                .crab { color: ${palette.crab} !important; }
+            `;
+            style.textContent = colorRules;
+        }
+
+        function createStyleTag() {
+            const style = document.createElement('style');
+            style.id = 'dynamic-colors';
+            document.head.appendChild(style);
+            return style;
+        }
+
+        function connectWebSocket() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}/ws`;
+
+            ws = new WebSocket(wsUrl);
+
+            ws.onopen = () => {
+                statusSpan.textContent = 'Connected';
+                statusSpan.className = 'status connected';
+            };
+            
+            ws.binaryType = "arraybuffer";
+
+            ws.onmessage = (event) => {
+                try {
+                    let text;
+
+                    if (typeof event.data === "string") {
+                        text = event.data;
+                    } else {
+                        const decoder = new TextDecoder("utf-8");
+                        text = decoder.decode(event.data);
+                    }
+
+                    const frame = JSON.parse(text);
+
+                    aquariumDiv.innerHTML = frame.grid_html;
+                    currentWidth = frame.width;
+                    currentHeight = frame.height;
+                    widthDisplay.textContent = currentWidth;
+                    heightDisplay.textContent = currentHeight;
+
+                    if (frame.palette) {
+                        applyPaletteStyles(frame.palette);
+                    }
+                } catch (e) {
+                    console.error('Failed to parse frame:', e);
+                }
+            };
+
+            ws.onerror = (error) => {
+                statusSpan.textContent = 'Error';
+                statusSpan.className = 'status error';
+                console.error('WebSocket error:', error);
+            };
+
+            ws.onclose = () => {
+                statusSpan.textContent = 'Disconnected';
+                statusSpan.className = 'status error';
+                setTimeout(connectWebSocket, 3000);
+            };
+        }
+
+        function sendCommand(cmd) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify(cmd));
+            }
+        }
+
+        // Button handlers
+        document.getElementById('btn-width-dec').addEventListener('click', () => {
+            if (currentWidth > 10) {
+                sendCommand({ type: 'set_grid_size', width: currentWidth - 2, height: currentHeight });
+            }
+        });
+
+        document.getElementById('btn-width-inc').addEventListener('click', () => {
+            sendCommand({ type: 'set_grid_size', width: currentWidth + 2, height: currentHeight });
+        });
+
+        document.getElementById('btn-height-dec').addEventListener('click', () => {
+            if (currentHeight > 5) {
+                sendCommand({ type: 'set_grid_size', width: currentWidth, height: currentHeight - 1 });
+            }
+        });
+
+        document.getElementById('btn-height-inc').addEventListener('click', () => {
+            sendCommand({ type: 'set_grid_size', width: currentWidth, height: currentHeight + 1 });
+        });
+
+        document.getElementById('btn-add-fish').addEventListener('click', () => {
+            sendCommand({ type: 'add_fish' });
+        });
+
+        document.getElementById('btn-add-crab').addEventListener('click', () => {
+            sendCommand({ type: 'add_crab' });
+        });
+
+        document.getElementById('btn-reset').addEventListener('click', () => {
+            sendCommand({ type: 'reset' });
+        });
+
+        // Initialize
+        connectWebSocket();
+    </script>
+</body>
+</html>
