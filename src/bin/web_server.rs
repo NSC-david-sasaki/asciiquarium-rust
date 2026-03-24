@@ -294,6 +294,14 @@ async fn handle_socket(
     sender_handle.abort();
 }
 
+// ==========================
+// Health check handler
+// ==========================
+async fn health() -> &'static str {
+    "OK"
+}
+
+
 #[cfg(feature = "web")]
 #[tokio::main]
 async fn main() {
@@ -364,11 +372,13 @@ async fn main() {
     let app = Router::new()
         .route("/", get(index))
         .route("/ws", get(ws_handler))
+        .route("/health", get(health))
         .with_state((state, tx))
         .layer(tower_http::cors::CorsLayer::permissive());
 
     let port = std::env::var("PORT").unwrap_or_else(|_| "3000".to_string());
-    let bind_addr = format!("127.0.0.1:{}", port);
+    let host = std::env::var("HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let bind_addr = format!("{}:{}", host, port);
     
     let listener = match tokio::net::TcpListener::bind(&bind_addr).await {
         Ok(l) => l,
@@ -379,8 +389,8 @@ async fn main() {
         }
     };
 
-    println!("✓ Web server listening on http://127.0.0.1:{}", port);
-    println!("  Open in browser: http://localhost:{}", port);
+    println!("✓ Web server listening on http://{}", bind_addr);
+    println!("  Open in browser: http://{}:{}", bind_addr, port);
     println!("  To use a different port, set: export PORT=3001");
     println!("  Then run: cargo run --features web --bin web_server");
 
